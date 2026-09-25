@@ -1,0 +1,54 @@
+// CHUNK 2: subcuencas 58-114 ordenadas por HYBAS_ID
+
+var atratoCuenca = ee.FeatureCollection('projects/sesion1setupatrato/assets/Atrato_Darien_shp');
+var hydrobasins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_9');
+var atratoSubcuencasRaw = hydrobasins.filterBounds(atratoCuenca.geometry());
+var atratoSubcuencas = atratoSubcuencasRaw.map(function(f) {
+  var geomRecortada = f.geometry().intersection(atratoCuenca.geometry(), ee.ErrorMargin(1));
+  return ee.Feature(geomRecortada).copyProperties(f, ['HYBAS_ID'])
+          .set('area_total_ha', geomRecortada.area().divide(10000));
+}).filter(ee.Filter.gte('area_total_ha', 100));
+
+var sorted = atratoSubcuencas.sort('HYBAS_ID');
+var listaCompleta = sorted.toList(170);
+var chunk = ee.FeatureCollection(listaCompleta.slice(57, 114));
+
+print('=== CHUNK 2: subcuencas 58-114 ===');
+print('Numero de subcuencas en este chunk:', chunk.size());
+
+function enmascararS2(img) {
+  var scl = img.select('SCL');
+  var mask = scl.neq(3).and(scl.neq(8)).and(scl.neq(9)).and(scl.neq(10));
+  return img.updateMask(mask);
+}
+
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(chunk.geometry())
+  .filterDate('2024-01-01', '2024-03-31')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50))
+  .map(enmascararS2);
+
+print('Imagenes Sentinel-2 disponibles para chunk 2:', s2.size());
+
+var s2Median = s2.median().select(['B3', 'B4', 'B8']);
+var ndti = s2Median.normalizedDifference(['B4', 'B3']).rename('NDTI');
+var ndwi = s2Median.normalizedDifference(['B3', 'B8']);
+var maskAgua = ndwi.gt(0);
+var ndtiAgua = ndti.updateMask(maskAgua);
+
+var statsChunk = ndtiAgua.reduceRegions({
+  collection: chunk,
+  reducer: ee.Reducer.mean(),
+  scale: 30,
+  tileScale: 16
+}).map(function(f) {
+  return f.set('D2_NDTI', f.get('mean')).set('chunk_id', 2);
+});
+
+Export.table.toDrive({
+  collection: statsChunk,
+  description: 'Atrato_D2_NDTI_chunk2',
+  folder: 'ACDSA_2027',
+  fileFormat: 'CSV',
+  selectors: ['HYBAS_ID', 'area_total_ha', 'D2_NDTI', 'chunk_id']
+});

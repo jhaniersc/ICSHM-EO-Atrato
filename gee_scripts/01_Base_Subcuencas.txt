@@ -1,0 +1,43 @@
+// ============================================================
+// 01_Base_Subcuencas: Subcuencas recortadas al Atrato oficial
+// Umbral geométrico Capa 1: 100 ha (elimina slivers < 1 km²)
+// ============================================================
+
+var atratoCuenca = ee.FeatureCollection('projects/sesion1setupatrato/assets/Atrato_Darien_shp');
+var hydrobasins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_9');
+
+var atratoSubcuencasRaw = hydrobasins.filterBounds(atratoCuenca.geometry());
+
+var atratoSubcuencas = atratoSubcuencasRaw.map(function(f) {
+  var geomRecortada = f.geometry().intersection(atratoCuenca.geometry(), ee.ErrorMargin(1));
+  return ee.Feature(geomRecortada).copyProperties(f, ['HYBAS_ID'])
+          .set('area_total_ha', geomRecortada.area().divide(10000));
+}).filter(ee.Filter.gte('area_total_ha', 100));
+
+// === VALIDACIÓN CUANTITATIVA ===
+var numSubcuencas = atratoSubcuencas.size();
+var sumaAreaHa = atratoSubcuencas.aggregate_sum('area_total_ha');
+var sumaAreaKm2 = sumaAreaHa.divide(100);
+var areaCuencaKm2 = atratoCuenca.geometry().area().divide(1e6);
+var diferenciaPct = areaCuencaKm2.subtract(sumaAreaKm2).divide(areaCuencaKm2).multiply(100);
+
+print('=== VALIDACIÓN DE LA BASE (umbral 100 ha) ===');
+print('Número de subcuencas filtradas:', numSubcuencas);
+print('Área cuenca oficial (km²):', areaCuencaKm2);
+print('Suma subcuencas filtradas (km²):', sumaAreaKm2);
+print('Diferencia (debe ser < 0.05%):', diferenciaPct, '%');
+print('Referencia IDEAM (km²): 38,500');
+
+// === VISUALIZACIÓN ===
+Map.centerObject(atratoCuenca, 8);
+Map.addLayer(atratoCuenca, {color: 'blue'}, 'Cuenca oficial Atrato');
+Map.addLayer(atratoSubcuencas, {color: 'yellow'}, 'Subcuencas filtradas (>=100 ha)');
+
+var subPrueba = ee.Feature(atratoSubcuencas.first());
+Map.addLayer(subPrueba, {color: 'red'}, 'Subcuenca de prueba');
+
+// === SUBCUENCA DE PRUEBA (práctica recomendada: print del objeto completo) ===
+print('=== SUBCUENCA DE PRUEBA ===');
+print(subPrueba);
+
+print('✅ Base construida con umbral 100 ha.');

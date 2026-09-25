@@ -1,0 +1,81 @@
+// ============================================================
+// 05_D5_MapBiomas: Fracción de área minera por subcuenca
+// Dataset: MapBiomas Colombia Colección 3.0 (Landsat, RF)
+// Banda: classification_2024 (año más reciente disponible)
+// Clase: 30 = Minería (código oficial MapBiomas)
+// Resolución nativa: 30 m
+// Umbral geométrico: 100 ha (consistente con 01_Base_Subcuencas)
+// ============================================================
+
+// === BASE (idéntica a 01_Base_Subcuencas) ===
+var atratoCuenca = ee.FeatureCollection('projects/sesion1setupatrato/assets/Atrato_Darien_shp');
+var hydrobasins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_9');
+var atratoSubcuencasRaw = hydrobasins.filterBounds(atratoCuenca.geometry());
+var atratoSubcuencas = atratoSubcuencasRaw.map(function(f) {
+  var geomRecortada = f.geometry().intersection(atratoCuenca.geometry(), ee.ErrorMargin(1));
+  return ee.Feature(geomRecortada).copyProperties(f, ['HYBAS_ID'])
+          .set('area_total_ha', geomRecortada.area().divide(10000));
+}).filter(ee.Filter.gte('area_total_ha', 100));
+
+// === CARGAR MAPBIOMAS COLOMBIA C3.0 ===
+var mapbiomas = ee.Image('projects/mapbiomas-colombia/assets/LULC/COLECCION3/INTEGRACION/COLOMBIA-1');
+
+// Ver bandas disponibles para verificar
+print('=== BANDAS DISPONIBLES EN MAPBIOMAS ===');
+print(mapbiomas.bandNames());
+
+// === IDENTIFICAR PÍXELES DE MINERÍA 2024 ===
+// MapBiomas Colombia código de clase 30 = Minería
+var mineria2024 = mapbiomas.select('classification_2024').eq(30).rename('mineria');
+
+// === VALIDACIÓN GLOBAL ===
+print('=== VALIDACIÓN D5 (MapBiomas Minería 2024) ===');
+
+// Área por píxel en hectáreas (30m × 30m = 900 m² = 0.09 ha)
+var areaPixel = ee.Image.pixelArea().divide(10000); // ha por píxel
+var mineriaHa = mineria2024.multiply(areaPixel);
+
+var mineriaTotalCuenca = mineriaHa.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: atratoCuenca.geometry(),
+  scale: 30,
+  maxPixels: 1e9
+});
+print('Hectáreas totales de minería 2024 en la cuenca:', mineriaTotalCuenca);
+
+// === AGREGACIÓN POR SUBCUENCA ===
+var statsD5 = mineriaHa.reduceRegions({
+  collection: atratoSubcuencas,
+  reducer: ee.Reducer.sum(),
+  scale: 30
+}).map(function(f) {
+  var mineria_ha = ee.Number(f.get('sum'));
+  var area_ha = ee.Number(f.get('area_total_ha'));
+  return f.set('D5_mineria_ha', mineria_ha)
+          .set('D5_proporcion', mineria_ha.divide(area_ha));
+});
+
+// === SUBCUENCA DE PRUEBA ===
+print('=== SUBCUENCA DE PRUEBA (primera) ===');
+print(ee.Feature(statsD5.first()));
+
+// === VISUALIZACIÓN ===
+Map.centerObject(atratoCuenca, 8);
+Map.addLayer(atratoCuenca, {color: 'blue'}, 'Cuenca Atrato');
+Map.addLayer(mineria2024.selfMask().clip(atratoCuenca),
+  {palette: ['magenta']},
+  'Minería MapBiomas 2024');
+
+// === EXPORTAR A DRIVE ===
+Export.table.toDrive({
+  collection: statsD5,
+  description: 'Atrato_D5_MapBiomas',
+  folder: 'ACDSA_2027',
+  fileFormat: 'CSV',
+  selectors: ['HYBAS_ID', 'area_total_ha', 'D5_mineria_ha', 'D5_proporcion']
+});
+
+print('✅ D5 (MapBiomas Minería) calculado.');
+print('   D5_mineria_ha  = hectáreas clasificadas como minería año 2024');
+print('   D5_proporcion  = fracción del área total con minería');
+print('   Ir a Tasks → RUN → exportar CSV.');

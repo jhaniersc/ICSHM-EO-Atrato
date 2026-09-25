@@ -1,0 +1,82 @@
+// ============================================================
+// 03_D2_v8_chunk1: Turbidez del agua (Sentinel-2) — CHUNK 1
+// Estrategia: dividir 170 subcuencas en 3 chunks para caber
+// en el timeout de 12h de GEE tras 7 fallos del enfoque unificado
+//
+// CHUNK 1: subcuencas ordenadas 1 a 57 por HYBAS_ID
+// CHUNK 2: subcuencas ordenadas 58 a 114 por HYBAS_ID
+// CHUNK 3: subcuencas ordenadas 115 a 170 por HYBAS_ID
+//
+// El calculo es equivalente al analisis unificado porque el NDTI
+// por subcuenca es una operacion local: solo depende de los
+// pixeles de agua dentro de esa subcuenca, no de sus vecinas.
+// La consolidacion en Colab produce las 170 filas identicas
+// al analisis global.
+// ============================================================
+
+// === BASE ===
+var atratoCuenca = ee.FeatureCollection('projects/sesion1setupatrato/assets/Atrato_Darien_shp');
+var hydrobasins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_9');
+var atratoSubcuencasRaw = hydrobasins.filterBounds(atratoCuenca.geometry());
+var atratoSubcuencas = atratoSubcuencasRaw.map(function(f) {
+  var geomRecortada = f.geometry().intersection(atratoCuenca.geometry(), ee.ErrorMargin(1));
+  return ee.Feature(geomRecortada).copyProperties(f, ['HYBAS_ID'])
+          .set('area_total_ha', geomRecortada.area().divide(10000));
+}).filter(ee.Filter.gte('area_total_ha', 100));
+
+// === CHUNK 1: PRIMERAS 57 SUBCUENCAS ORDENADAS POR HYBAS_ID ===
+// Ordenamos ascendentemente por HYBAS_ID para division determinista
+var sorted = atratoSubcuencas.sort('HYBAS_ID');
+var listaCompleta = sorted.toList(170);
+var chunk = ee.FeatureCollection(listaCompleta.slice(0, 57));
+
+print('=== CHUNK 1: subcuencas 1-57 ===');
+print('Numero de subcuencas en este chunk:', chunk.size());
+
+// === MASCARA SCL ===
+function enmascararS2(img) {
+  var scl = img.select('SCL');
+  var mask = scl.neq(3).and(scl.neq(8)).and(scl.neq(9)).and(scl.neq(10));
+  return img.updateMask(mask);
+}
+
+// === COLECCION SENTINEL-2 ===
+// filterBounds sobre el chunk reduce escenas a las que tocan solo esa area
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(chunk.geometry())
+  .filterDate('2024-01-01', '2024-03-31')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50))
+  .map(enmascararS2);
+
+print('Imagenes Sentinel-2 disponibles para chunk 1:', s2.size());
+
+// === COMPOSICION ===
+var s2Median = s2.median().select(['B3', 'B4', 'B8']);
+
+// === NDTI + MASCARA AGUA ===
+var ndti = s2Median.normalizedDifference(['B4', 'B3']).rename('NDTI');
+var ndwi = s2Median.normalizedDifference(['B3', 'B8']);
+var maskAgua = ndwi.gt(0);
+var ndtiAgua = ndti.updateMask(maskAgua);
+
+// === AGREGACION POR SUBCUENCA DEL CHUNK ===
+var statsChunk = ndtiAgua.reduceRegions({
+  collection: chunk,
+  reducer: ee.Reducer.mean(),
+  scale: 30,
+  tileScale: 16
+}).map(function(f) {
+  return f.set('D2_NDTI', f.get('mean')).set('chunk_id', 1);
+});
+
+// === EXPORTAR ===
+Export.table.toDrive({
+  collection: statsChunk,
+  description: 'Atrato_D2_NDTI_chunk1',
+  folder: 'ACDSA_2027',
+  fileFormat: 'CSV',
+  selectors: ['HYBAS_ID', 'area_total_ha', 'D2_NDTI', 'chunk_id']
+});
+
+print('CHUNK 1 lanzado. Tiempo esperado: 8-20 min.');
+print('   Ir a Tasks -> RUN al task Atrato_D2_NDTI_chunk1.');

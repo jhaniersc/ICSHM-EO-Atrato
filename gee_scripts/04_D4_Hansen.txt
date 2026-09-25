@@ -1,0 +1,88 @@
+// ============================================================
+// 04_D4_Hansen: Pérdida forestal acumulada 2018-2024
+// Dataset: Hansen Global Forest Change v1.12 (update 2024)
+// Banda lossyear: 0 = sin pérdida, 1-24 = año (2001-2024)
+// Ventana temporal: 2018-2024 (códigos 18-24)
+// Máscara de bosque 2000: treecover2000 >= 30%
+//   (Hansen et al. 2013; Curtis et al. 2018)
+// Resolución nativa: 30 m
+// Umbral geométrico: 100 ha (consistente con 01_Base_Subcuencas)
+// ============================================================
+
+// === BASE (idéntica a 01_Base_Subcuencas) ===
+var atratoCuenca = ee.FeatureCollection('projects/sesion1setupatrato/assets/Atrato_Darien_shp');
+var hydrobasins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_9');
+var atratoSubcuencasRaw = hydrobasins.filterBounds(atratoCuenca.geometry());
+var atratoSubcuencas = atratoSubcuencasRaw.map(function(f) {
+  var geomRecortada = f.geometry().intersection(atratoCuenca.geometry(), ee.ErrorMargin(1));
+  return ee.Feature(geomRecortada).copyProperties(f, ['HYBAS_ID'])
+          .set('area_total_ha', geomRecortada.area().divide(10000));
+}).filter(ee.Filter.gte('area_total_ha', 100));
+
+// === CARGAR HANSEN GFC 2024 ===
+var hansen = ee.Image('UMD/hansen/global_forest_change_2024_v1_12');
+var lossyear = hansen.select('lossyear');
+
+// === MÁSCARA DE BOSQUE 2000 (Hansen et al. 2013 recomendado) ===
+// Solo cuenta pérdida en píxeles que en 2000 tenían >=30% de cobertura arbórea
+// Estándar de la literatura de bosque tropical (Curtis et al. 2018)
+var treecover2000 = hansen.select('treecover2000');
+var maskBosque2000 = treecover2000.gte(30);
+
+// === IDENTIFICAR PÉRDIDA 2018-2024 EN BOSQUE REAL ===
+var perdida2018_2024 = lossyear.gte(18)
+  .and(lossyear.lte(24))
+  .and(maskBosque2000)
+  .rename('perdida');
+
+// === VALIDACIÓN GLOBAL ===
+print('=== VALIDACIÓN D4 (Hansen 2018-2024 en bosque real) ===');
+
+// Área por píxel en hectáreas (30m × 30m = 900 m² = 0.09 ha)
+var areaPixel = ee.Image.pixelArea().divide(10000); // ha por píxel
+var perdidaHa = perdida2018_2024.multiply(areaPixel);
+
+var perdidaTotalCuenca = perdidaHa.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: atratoCuenca.geometry(),
+  scale: 30,
+  maxPixels: 1e9
+});
+print('Hectáreas totales de pérdida 2018-2024 en la cuenca:', perdidaTotalCuenca);
+
+// === AGREGACIÓN POR SUBCUENCA ===
+var statsD4 = perdidaHa.reduceRegions({
+  collection: atratoSubcuencas,
+  reducer: ee.Reducer.sum(),
+  scale: 30
+}).map(function(f) {
+  var perdida_ha = ee.Number(f.get('sum'));
+  var area_ha = ee.Number(f.get('area_total_ha'));
+  return f.set('D4_perdida_ha', perdida_ha)
+          .set('D4_proporcion', perdida_ha.divide(area_ha));
+});
+
+// === SUBCUENCA DE PRUEBA ===
+print('=== SUBCUENCA DE PRUEBA (primera) ===');
+print(ee.Feature(statsD4.first()));
+
+// === VISUALIZACIÓN ===
+Map.centerObject(atratoCuenca, 8);
+Map.addLayer(atratoCuenca, {color: 'blue'}, 'Cuenca Atrato');
+Map.addLayer(perdida2018_2024.selfMask().clip(atratoCuenca),
+  {palette: ['red']},
+  'Pérdida forestal 2018-2024 (en bosque real)');
+
+// === EXPORTAR A DRIVE ===
+Export.table.toDrive({
+  collection: statsD4,
+  description: 'Atrato_D4_Hansen',
+  folder: 'ACDSA_2027',
+  fileFormat: 'CSV',
+  selectors: ['HYBAS_ID', 'area_total_ha', 'D4_perdida_ha', 'D4_proporcion']
+});
+
+print('✅ D4 (Hansen) calculado con máscara treecover2000 >= 30%.');
+print('   D4_perdida_ha  = hectáreas perdidas 2018-2024');
+print('   D4_proporcion  = fracción del área total que se perdió');
+print('   Ir a Tasks → RUN → exportar CSV.');

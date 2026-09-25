@@ -1,0 +1,91 @@
+// ============================================================
+// 02_D1_PScore: Standardized Precipitation Anomaly
+// Renombrado de "SPI" siguiendo Opción A: z-score directo
+// sin ajuste Gamma, para evitar supuestos distribucionales
+// en cuencas ecuatoriales húmedas (Chocó).
+// SPI empírico (Guttman 1999) queda como future work.
+// Período base: 1981-2020 (40 años, normales WMO)
+// Año evaluado: 2024
+// Umbral geométrico: 100 ha (consistente con 01_Base_Subcuencas)
+// ============================================================
+
+// === BASE (idéntica a 01_Base_Subcuencas, umbral 100 ha) ===
+var atratoCuenca = ee.FeatureCollection('projects/sesion1setupatrato/assets/Atrato_Darien_shp');
+var hydrobasins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_9');
+var atratoSubcuencasRaw = hydrobasins.filterBounds(atratoCuenca.geometry());
+var atratoSubcuencas = atratoSubcuencasRaw.map(function(f) {
+  var geomRecortada = f.geometry().intersection(atratoCuenca.geometry(), ee.ErrorMargin(1));
+  return ee.Feature(geomRecortada).copyProperties(f, ['HYBAS_ID'])
+          .set('area_total_ha', geomRecortada.area().divide(10000));
+}).filter(ee.Filter.gte('area_total_ha', 100));
+
+// === CÁLCULO DEL P-SCORE ===
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY');
+var aniosBase = ee.List.sequence(1981, 2020);
+
+var coleccionAnual = ee.ImageCollection(aniosBase.map(function(y) {
+  var start = ee.Date.fromYMD(y, 1, 1);
+  return chirps.filterDate(start, start.advance(1, 'year')).sum().rename('precip');
+}));
+
+var mediaP = coleccionAnual.mean();
+var stdP = coleccionAnual.reduce(ee.Reducer.stdDev());
+var precip2024 = chirps.filterDate('2024-01-01', '2025-01-01').sum().rename('precip');
+
+// P-Score = (precip_2024 − media_1981-2020) / stdDev_1981-2020
+var pscoreRaw = precip2024.subtract(mediaP).divide(stdP).rename('P_Score');
+
+// Máscara real: píxeles fuera de [-3, +3] excluidos del reducer
+var pscore = pscoreRaw.updateMask(
+  pscoreRaw.gte(-3).and(pscoreRaw.lte(3))
+);
+
+// === VALIDACIÓN ===
+print('=== VALIDACIÓN P-SCORE ===');
+print('P-Score crudo min/max:', pscoreRaw.reduceRegion({
+  reducer: ee.Reducer.minMax(),
+  geometry: atratoCuenca.geometry(),
+  scale: 5566,
+  maxPixels: 1e9
+}));
+print('P-Score filtrado min/max:', pscore.reduceRegion({
+  reducer: ee.Reducer.minMax(),
+  geometry: atratoCuenca.geometry(),
+  scale: 5566,
+  maxPixels: 1e9
+}));
+
+// === AGREGACIÓN POR SUBCUENCA (scale nativo CHIRPS 5566 m) ===
+var statsD1 = pscore.reduceRegions({
+  collection: atratoSubcuencas,
+  reducer: ee.Reducer.mean(),
+  scale: 5566
+}).map(function(f) {
+  return f.set('D1_PScore', f.get('mean'));
+});
+
+// === SUBCUENCA DE PRUEBA ===
+print('=== SUBCUENCA DE PRUEBA (primera) ===');
+print(ee.Feature(statsD1.first()));
+
+// === VISUALIZACIÓN ===
+Map.centerObject(atratoCuenca, 8);
+Map.addLayer(atratoCuenca, {color: 'blue'}, 'Cuenca Atrato');
+Map.addLayer(pscore.clip(atratoCuenca),
+  {min: -3, max: 3, palette: ['red', 'orange', 'yellow', 'white', 'lightblue', 'blue', 'darkblue']},
+  'P-Score 2024');
+
+// === EXPORTAR A DRIVE ===
+Export.table.toDrive({
+  collection: statsD1,
+  description: 'Atrato_D1_PScore_v2',
+  folder: 'ACDSA_2027',
+  fileFormat: 'CSV',
+  selectors: ['HYBAS_ID', 'area_total_ha', 'D1_PScore']
+});
+
+print('✅ D1 (P-Score) calculado. Interpretación:');
+print('   Negativo = más seco que la media 1981-2020');
+print('   Cero     = igual a la media');
+print('   Positivo = más húmedo que la media');
+print('   Ir a Tasks → RUN → exportar CSV.');
